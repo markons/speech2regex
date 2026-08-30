@@ -47,6 +47,10 @@ To set it up:
    ```
    ollama pull tinyllama
    ```
+   Alternatively, the GGUF weights and Modelfile are attached to this repo's
+   [`tinyllama-latest` release](https://github.com/markons/speech2regex/releases/tag/tinyllama-latest)
+   if you'd rather download them directly and build the model with
+   `ollama create tinyllama -f Modelfile`.
 4. That's it — no further configuration. The app talks to Ollama
    automatically whenever the AI fallback is used.
 
