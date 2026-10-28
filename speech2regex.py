@@ -46,7 +46,7 @@ except ImportError:
 # IPv6 ::1 first, which hangs until the request times out instead of
 # failing fast when Ollama is only listening on IPv4.
 DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
-DEFAULT_OLLAMA_MODEL = "tinyllama:latest"
+DEFAULT_OLLAMA_MODEL = "qwen3:8b"
 OLLAMA_STATUS_POLL_MS = 4000
 
 
@@ -376,10 +376,16 @@ def ask_ollama(description, model=DEFAULT_OLLAMA_MODEL, host=DEFAULT_OLLAMA_HOST
         "model": model,
         "prompt": prompt,
         "stream": False,
+        # Hybrid-reasoning models (e.g. qwen3) default to spending the whole
+        # num_predict budget on a hidden "thinking" block, leaving `response`
+        # empty. Harmless no-op for models without a reasoning mode.
+        "think": False,
         # num_predict/stop bound worst-case latency: without them, a small
         # model can ramble past its coherent answer and run for minutes
-        # instead of stopping after the one-line regex we asked for.
-        "options": {"temperature": 0, "num_predict": 64, "stop": ["\n"]},
+        # instead of stopping after the one-line regex we asked for. 200 is
+        # enough headroom for longer patterns (e.g. IPv4/email regexes)
+        # that would get truncated mid-expression at 64.
+        "options": {"temperature": 0, "num_predict": 200, "stop": ["\n"]},
     }).encode('utf-8')
     url = f"{host.rstrip('/')}/api/generate"
     req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
@@ -399,14 +405,18 @@ def ask_ollama(description, model=DEFAULT_OLLAMA_MODEL, host=DEFAULT_OLLAMA_HOST
     return extract_regex(raw), raw
 
 
-def check_ollama_alive(host=DEFAULT_OLLAMA_HOST, timeout=2):
-    """Quick liveness probe: is an Ollama server actually answering at host?"""
+def list_ollama_models(host=DEFAULT_OLLAMA_HOST, timeout=2):
+    """Liveness probe + model list: names of the models installed at host,
+    or None if no Ollama server is answering there."""
     url = f"{host.rstrip('/')}/api/tags"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return resp.status == 200
+            if resp.status != 200:
+                return None
+            body = json.loads(resp.read().decode('utf-8'))
     except Exception:
-        return False
+        return None
+    return sorted(m['name'] for m in body.get('models', []) if m.get('name'))
 
 
 SEQUENCE_CONNECTOR_RE = re.compile(r'\bthen\b', re.I)
@@ -771,7 +781,10 @@ class RegexGuiApp:
 
         ttk.Label(ai_frame, text="Model:").grid(row=1, column=0, sticky='w', padx=(6, 2))
         self.ollama_model_var = tk.StringVar(value=DEFAULT_OLLAMA_MODEL)
-        ttk.Entry(ai_frame, textvariable=self.ollama_model_var, width=16).grid(row=1, column=1, sticky='w')
+        self.ollama_models_loaded = False
+        self.ollama_model_combo = ttk.Combobox(
+            ai_frame, textvariable=self.ollama_model_var, width=22, values=[])
+        self.ollama_model_combo.grid(row=1, column=1, sticky='w')
 
         ttk.Label(ai_frame, text="Host:").grid(row=1, column=2, sticky='w', padx=(10, 2))
         self.ollama_host_var = tk.StringVar(value=DEFAULT_OLLAMA_HOST)
@@ -803,18 +816,25 @@ class RegexGuiApp:
         host = self.ollama_host_var.get().strip() or DEFAULT_OLLAMA_HOST
 
         def worker():
-            self.ollama_ping_queue.put(check_ollama_alive(host))
+            self.ollama_ping_queue.put(list_ollama_models(host))
 
         threading.Thread(target=worker, daemon=True).start()
         self.root.after(200, self._check_ollama_ping_queue)
 
     def _check_ollama_ping_queue(self):
         try:
-            alive = self.ollama_ping_queue.get_nowait()
+            models = self.ollama_ping_queue.get_nowait()
         except queue.Empty:
             self.root.after(200, self._check_ollama_ping_queue)
             return
-        if alive:
+        if models is not None:
+            self.ollama_model_combo.configure(values=models)
+            # First successful fetch: if the default isn't installed, start
+            # with an installed model instead of one that would 404.
+            if not self.ollama_models_loaded and models \
+                    and self.ollama_model_var.get() not in models:
+                self.ollama_model_var.set(models[0])
+            self.ollama_models_loaded = True
             self.ollama_alive_var.set('● Ollama running')
             self.ollama_alive_label.configure(foreground='#1a7f37')
         else:

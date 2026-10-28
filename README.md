@@ -22,14 +22,16 @@ recognition beyond 0-10 (e.g. "twelve digits", "twenty characters") for the
 **sequence** phrasing described below. Without it, that phrasing still
 works for the numbers zero through ten.
 
-### 2. Ollama + the `tinyllama` model (optional, for the AI fallback)
+### 2. Ollama + the `qwen3:8b` model (optional, for the AI fallback)
 
 The AI fallback (see below) needs [Ollama](https://ollama.com), a free
 program that runs small open language models entirely on your own PC — no
 account, no API key, no subscription, nothing sent over the internet.
-`tinyllama` is one of the models Ollama can run: a small (~1.1B-parameter)
-open model, chosen here because it was the fastest and most accurate of the
-lightweight models tested on ordinary CPU-only hardware (no GPU required).
+`qwen3:8b` is the default model: an ~8B-parameter open model that was
+tested to actually produce correct, complete regexes for descriptions the
+heuristic can't handle (e.g. "match a valid IPv4 address"). It runs fine on
+CPU-only hardware, just slower (roughly 15-25 seconds per request) than the
+tiny models.
 
 To set it up:
 
@@ -42,17 +44,23 @@ To set it up:
    ```
    ollama serve
    ```
-3. Pull the `tinyllama` model (one-time download, ~637 MB, then works fully
+3. Pull the `qwen3:8b` model (one-time download, ~5 GB, then works fully
    offline):
    ```
-   ollama pull tinyllama
+   ollama pull qwen3:8b
    ```
-   Alternatively, the GGUF weights and Modelfile are attached to this repo's
-   [`tinyllama-latest` release](https://github.com/markons/speech2regex/releases/tag/tinyllama-latest)
-   if you'd rather download them directly and build the model with
-   `ollama create tinyllama -f Modelfile`.
 4. That's it — no further configuration. The app talks to Ollama
    automatically whenever the AI fallback is used.
+
+If you'd rather have a smaller, much faster (single-digit seconds on CPU)
+but noticeably weaker fallback, `tinyllama` (~1.1B parameters, ~637 MB) is
+still an option — set the Model field in the app to `tinyllama:latest`.
+It tends to confuse the worked example baked into the prompt with your
+actual description on anything beyond very simple requests, so `qwen3:8b`
+is the recommended default. The GGUF weights and Modelfile for `tinyllama`
+are attached to this repo's
+[`tinyllama-latest` release](https://github.com/markons/speech2regex/releases/tag/tinyllama-latest)
+if you'd rather build it from those than `ollama pull tinyllama`.
 
 If you skip this step, the app still works fully for everything the
 heuristic parser can handle — you'll just see a friendly "Ollama not
@@ -82,7 +90,18 @@ python speech2regex.py
 3. The regex field is editable — tweak it directly if the heuristic missed
    something.
 
-4. Enter one or more test strings (one per line) in the **Test strings** box
+4. Some descriptions don't match any phrasing the heuristic recognizes at
+   all (no position/character-class/length/containment wording it can
+   latch onto) — for example:
+
+   > Match strings that look like a valid IPv4 address, such as 192.168.0.1.
+
+   Here the heuristic parser produces nothing, so — with "Auto-ask when
+   heuristic parsing fails completely" checked (on by default) — the app
+   automatically calls the local Ollama model instead and drops its
+   suggestion into the regex field. See **Local AI fallback** below.
+
+5. Enter one or more test strings (one per line) in the **Test strings** box
    and click **Test Match** to see which ones match. This checks whether the
    pattern is found anywhere in each line (like `re.search`), not just at
    the very start — so an unanchored regex (no `^`) will match a string that
@@ -92,10 +111,15 @@ python speech2regex.py
 
 For phrasing the heuristic parser can't confidently handle, the app can ask
 a local Ollama model to suggest a regex instead. See **Installation**
-above for how to set up Ollama and pull the default model (`tinyllama`).
+above for how to set up Ollama and pull the default model (`qwen3:8b`).
 
 In the app, the **Local AI fallback** panel lets you set the model name
-and host (defaults: `tinyllama:latest` at `http://127.0.0.1:11434`).
+and host (defaults: `qwen3:8b` at `http://127.0.0.1:11434`). Try it with:
+
+> Match strings that look like a valid IPv4 address, such as 192.168.0.1.
+
+which the heuristic can't parse at all (no position/length/character-class
+wording it recognizes), so it hands off to Ollama automatically.
 
 - With "Auto-ask when heuristic parsing fails completely" checked, it's
   called automatically only when the heuristic produces no regex at all.
@@ -111,26 +135,27 @@ and host (defaults: `tinyllama:latest` at `http://127.0.0.1:11434`).
   pattern. If Ollama isn't running or the model isn't pulled, the panel
   shows a plain-language error instead of failing silently.
 
-Responses are capped at 64 generated tokens and stop at the first newline,
+Responses are capped at 200 generated tokens and stop at the first newline,
 so a request can't run away rambling for minutes past a one-line answer —
 if a request does take unexpectedly long, it's more likely stuck loading
-the model for the first time than generating.
+the model for the first time than generating. The request also sends
+`"think": false`, since `qwen3` (like other hybrid-reasoning models) would
+otherwise spend its whole token budget on a hidden chain-of-thought and
+never actually emit the regex.
 
-This is a suggestion from a small local model, not a guarantee — always
-check it against the "Interpretation" panel and your test strings.
-`tinyllama` is fast (single-digit seconds on CPU) and was the most
-structurally correct of the lightweight models tested during development,
-but it can still miss part of a request — e.g. on a "password with at
-least 8 characters, containing an uppercase letter, a lowercase letter, a
-digit, and a special character" prompt, it correctly used lookaheads for
-three of the four required character classes but dropped the
+This is a suggestion from a local model, not a guarantee — always check it
+against the "Interpretation" panel and your test strings. `qwen3:8b` gets
+non-trivial patterns (IPv4 addresses, email addresses) right in testing,
+but can still miss part of a request — e.g. on a "password with at least 8
+characters, containing an uppercase letter, a lowercase letter, a digit,
+and a special character" prompt, models this size have been seen to use
+lookaheads for three of the four required character classes but drop the
 special-character one.
 
-If your machine has a GPU (or you don't mind waiting), you can point the
-Model field at a larger pulled model (e.g. `llama3.2` or `qwen3:4b`) for
-potentially better answers — on CPU-only hardware, "thinking" models like
-the `qwen3`/`deepseek-r1` families were tested and found too slow to be
-practical (over a minute per request).
+If your machine is CPU-only and 15-25 seconds per request feels slow, you
+can point the Model field at `tinyllama:latest` for near-instant answers at
+the cost of reliability (see **Installation** above), or if you have a GPU,
+at a larger pulled model for potentially better answers still.
 
 ## What it understands
 
